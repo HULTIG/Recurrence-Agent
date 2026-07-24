@@ -1,0 +1,14 @@
+# Data cleaning and baseline models
+pandas
+scikit-learn
+xgboost
+lightgbm
+
+# Dashboard
+streamlit
+plotly
+
+# Fine-tuning (requires NVIDIA GPU with CUDA)
+unsloth
+trl
+datasets
