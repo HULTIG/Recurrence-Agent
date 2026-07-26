@@ -1,0 +1,2 @@
+model,accuracy,f1,precision,recall,dropped,total
+results/qwen25_3b_compas_lora,0.702834008097166,0.638423645320197,0.7152317880794702,0.5765124555160143,0,1235
