@@ -1,3 +1,4 @@
+import joblib
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
@@ -6,19 +7,16 @@ from xgboost import XGBClassifier
 
 COMPAS_PATH = "clean_data/compas-scores-two-years.csv"
 SHARED_PATH = "schema/canonical_shared_schema.csv"
+ARTIFACTS_DIR = "results/baseline_compas"
 
 NON_FEATURE_COLUMNS = [
     "id",
-    "race",  # kept only for the fairness audit, never as a feature
+    "race",
     "two_year_recid",
-    "event", "start", "end",  # define/derive the target window, would leak it
-    # These describe the recidivism event itself (outcome), not something
-    # knowable at profile time, near-perfect proxies of the target:
-    # is_recid==0 implies two_year_recid==0 in 100% of rows
+    "event", "start", "end",
     "is_recid", "is_violent_recid",
     "r_charge_degree", "r_days_from_arrest", "r_days_from_arrest_missing",
     "vr_charge_degree",
-    # COMPAS's own risk scores, comparison baseline only, not a training feature
     "decile_score", "score_text", "type_of_assessment",
     "v_decile_score", "v_score_text", "v_type_of_assessment",
 ]
@@ -46,6 +44,9 @@ def fairness_report(y_true, y_pred, race_group):
 
 
 def main():
+    import os
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
     compas = pd.read_csv(COMPAS_PATH)
     shared = pd.read_csv(SHARED_PATH)
     compas_shared = shared[shared["dataset_origin"] == "COMPAS"].set_index("id")
@@ -80,6 +81,18 @@ def main():
         print(f"F1: {f1_score(y_test, y_pred):.4f}")
         print(f"AUC: {roc_auc_score(y_test, y_proba):.4f}")
         print(fairness_report(y_test, y_pred, race_test).to_string(index=False))
+
+        # guarda o modelo treinado para reutilizacao (ex: SHAP, sem retreinar)
+        joblib.dump(model, f"{ARTIFACTS_DIR}/{name.lower()}_model.pkl")
+
+    # guarda o X_test (ja com one-hot encoding) e metadados, para o script de explicacao
+    X_test.reset_index(drop=True).to_csv(f"{ARTIFACTS_DIR}/X_test.csv", index=False)
+    pd.DataFrame({
+        "y_true": y_test.reset_index(drop=True),
+        "race_group": race_test.reset_index(drop=True),
+    }).to_csv(f"{ARTIFACTS_DIR}/test_meta.csv", index=False)
+
+    print(f"\nModelos e X_test guardados em: {ARTIFACTS_DIR}/")
 
 
 if __name__ == "__main__":

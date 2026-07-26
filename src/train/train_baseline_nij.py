@@ -1,3 +1,4 @@
+import joblib
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
@@ -5,16 +6,16 @@ from xgboost import XGBClassifier
 
 NIJ_PATH = "clean_data/nij-challenge2021.csv"
 SHARED_PATH = "schema/canonical_shared_schema.csv"
+ARTIFACTS_DIR = "results/baseline_nij"
 
-# Columns that are targets, leak the target, or are not real features
 NON_FEATURE_COLUMNS = [
     "id",
-    "race",  # kept only for the fairness audit, never as a feature
+    "race",
     "recidivism_within_3years",
     "recidivism_arrest_year1",
     "recidivism_arrest_year2",
     "recidivism_arrest_year3",
-    "training_sample",  # original NIJ split flag, not a feature
+    "training_sample",
 ]
 
 CATEGORICAL_COLUMNS = [
@@ -41,6 +42,9 @@ def fairness_report(y_true, y_pred, race_group):
 
 
 def main():
+    import os
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
     nij = pd.read_csv(NIJ_PATH)
     shared = pd.read_csv(SHARED_PATH)
     nij_shared = shared[shared["dataset_origin"] == "NIJ"].set_index("id")
@@ -76,6 +80,16 @@ def main():
         print(f"F1: {f1_score(y_test, y_pred):.4f}")
         print(f"AUC: {roc_auc_score(y_test, y_proba):.4f}")
         print(fairness_report(y_test, y_pred, race_test).to_string(index=False))
+
+        joblib.dump(model, f"{ARTIFACTS_DIR}/{name.lower()}_model.pkl")
+
+    X_test.reset_index(drop=True).to_csv(f"{ARTIFACTS_DIR}/X_test.csv", index=False)
+    pd.DataFrame({
+        "y_true": y_test.reset_index(drop=True),
+        "race_group": race_test.reset_index(drop=True),
+    }).to_csv(f"{ARTIFACTS_DIR}/test_meta.csv", index=False)
+
+    print(f"\nModelos e X_test guardados em: {ARTIFACTS_DIR}/")
 
 
 if __name__ == "__main__":

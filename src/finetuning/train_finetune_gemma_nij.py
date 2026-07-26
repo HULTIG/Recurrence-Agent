@@ -1,10 +1,12 @@
 import os
 
+#os.environ["TORCHDYNAMO_DISABLE"] = "1"
+
 import gc
 import torch
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
-from unsloth import FastLanguageModel
+from unsloth import FastModel
 from unsloth.chat_templates import get_chat_template
 from trl import SFTTrainer, SFTConfig
 from datasets import Dataset
@@ -14,10 +16,10 @@ from finetune_common_functions import build_chat_examples, generate_predictions
 NIJ_PATH = "clean_data/nij-challenge2021.csv"
 SHARED_PATH = "schema/canonical_shared_schema.csv"
 
-# MODELO E SEQLEN OTIMIZADOS PARA 8GB VRAM (RTX 4060)
-MODEL_NAME = "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
-CHAT_TEMPLATE = "qwen-2.5"
-OUT_DIR = "results/qwen25_3b_nij_lora"
+# MODELO OTIMIZADO PARA 8GB VRAM (RTX 4060) — Gemma 3 4B, classe de tamanho semelhante ao Qwen2.5-3B
+MODEL_NAME = "unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
+CHAT_TEMPLATE = "gemma-3"
+OUT_DIR = "results/gemma3_4b_nij_lora"
 
 MAX_SEQ_LENGTH = 768
 
@@ -52,21 +54,26 @@ def load_data():
 def main():
     train_df, test_df, train_target, test_target, test_race, feature_columns = load_data()
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, tokenizer = FastModel.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
-        attn_implementation="sdpa",
+        full_finetuning=False,
     )
     tokenizer = get_chat_template(tokenizer, chat_template=CHAT_TEMPLATE)
 
-    model = FastLanguageModel.get_peft_model(
+    model = FastModel.get_peft_model(
         model,
+        finetune_vision_layers=False,     # nao precisamos de visao, so texto
+        finetune_language_layers=True,
+        finetune_attention_modules=True,
+        finetune_mlp_modules=True,
         r=8,
         lora_alpha=8,
         lora_dropout=0,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        bias="none",
         use_gradient_checkpointing="unsloth",
+        random_state=3407,
     )
 
     train_examples = build_chat_examples(train_df, feature_columns, train_target)
@@ -101,12 +108,11 @@ def main():
     model.save_pretrained(OUT_DIR)
     tokenizer.save_pretrained(OUT_DIR)
 
-    # Liberta memoria do treino (otimizador, gradientes) antes da inferencia
     del trainer
     gc.collect()
     torch.cuda.empty_cache()
 
-    FastLanguageModel.for_inference(model)
+    FastModel.for_inference(model)
     preds = generate_predictions(model, tokenizer, test_df, feature_columns)
 
     valid = [(y, p) for y, p in zip(test_target, preds) if p is not None]

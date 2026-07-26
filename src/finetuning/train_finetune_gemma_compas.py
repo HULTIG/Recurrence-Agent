@@ -3,7 +3,7 @@ import torch
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
-from unsloth import FastLanguageModel
+from unsloth import FastModel
 from unsloth.chat_templates import get_chat_template
 from trl import SFTTrainer, SFTConfig
 from datasets import Dataset
@@ -13,12 +13,12 @@ from finetune_common_functions import build_chat_examples, generate_predictions
 COMPAS_PATH = "clean_data/compas-scores-two-years.csv"
 SHARED_PATH = "schema/canonical_shared_schema.csv"
 
-# MODELO OTIMIZADO PARA 8GB VRAM (RTX 4060) — trocado de gemma-4-E4B-it
-MODEL_NAME = "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
-CHAT_TEMPLATE = "qwen-2.5"
-OUT_DIR = "results/qwen25_3b_compas_lora"
+# MODELO OTIMIZADO PARA 8GB VRAM (RTX 4060) — Gemma 3 4B, classe de tamanho semelhante ao Qwen2.5-3B
+MODEL_NAME = "unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
+CHAT_TEMPLATE = "gemma-3"
+OUT_DIR = "results/gemma3_4b_compas_lora"
 
-MAX_SEQ_LENGTH = 256
+MAX_SEQ_LENGTH = 1024
 
 # Same exclusions as train_baseline_compas.py: no id, no race (fairness
 # audit only), no target/leakage columns (event outcome fields leak the
@@ -44,8 +44,6 @@ def load_data():
 
     feature_columns = [c for c in compas.columns if c not in NON_FEATURE_COLUMNS]
 
-    # Same 80/20 stratified split as train_baseline_compas.py, so the
-    # comparison against the XGBoost/LightGBM numbers is apples-to-apples
     train_idx, test_idx = train_test_split(
         compas.index, test_size=0.2, stratify=target, random_state=42
     )
@@ -61,31 +59,33 @@ def load_data():
 def main():
     train_df, test_df, train_target, test_target, test_race, feature_columns = load_data()
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, tokenizer = FastModel.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
-        attn_implementation="sdpa",
+        full_finetuning=False,
     )
     tokenizer = get_chat_template(tokenizer, chat_template=CHAT_TEMPLATE)
 
-    model = FastLanguageModel.get_peft_model(
+    model = FastModel.get_peft_model(
         model,
+        finetune_vision_layers=False,     # nao precisamos de visao, so texto
+        finetune_language_layers=True,
+        finetune_attention_modules=True,
+        finetune_mlp_modules=True,
         r=16,
         lora_alpha=16,
         lora_dropout=0,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        bias="none",
         use_gradient_checkpointing="unsloth",
+        random_state=3407,
     )
 
     train_examples = build_chat_examples(train_df, feature_columns, train_target)
     train_dataset = Dataset.from_list(train_examples)
 
-    def formatting_func(examples):
-        messages = examples["messages"]
-        if len(messages) > 0 and isinstance(messages[0], dict):
-            return [tokenizer.apply_chat_template(messages, tokenize=False)]
-        return [tokenizer.apply_chat_template(msg, tokenize=False) for msg in messages]
+    def formatting_func(example):
+        return tokenizer.apply_chat_template(example["messages"], tokenize=False)
 
     trainer = SFTTrainer(
         model=model,
@@ -100,8 +100,8 @@ def main():
             logging_steps=20,
             output_dir=OUT_DIR,
             max_seq_length=MAX_SEQ_LENGTH,
-            optim="adamw_8bit",     # reduz o estado do otimizador em VRAM
-            bf16=True,              # RTX 4060 (Ada) suporta bf16 nativamente
+            optim="adamw_8bit",
+            bf16=True,
             fp16=False,
         ),
     )
@@ -110,12 +110,11 @@ def main():
     model.save_pretrained(OUT_DIR)
     tokenizer.save_pretrained(OUT_DIR)
 
-    # Liberta memoria do treino (otimizador, gradientes) antes da inferencia
     del trainer
     gc.collect()
     torch.cuda.empty_cache()
 
-    FastLanguageModel.for_inference(model)
+    FastModel.for_inference(model)
     preds = generate_predictions(model, tokenizer, test_df, feature_columns)
 
     valid = [(y, p) for y, p in zip(test_target, preds) if p is not None]

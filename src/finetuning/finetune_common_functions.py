@@ -1,4 +1,7 @@
+import gc
+
 import pandas as pd
+import torch
 
 INSTRUCTION = (
     "Analisa o seguinte perfil de uma pessoa em liberdade condicional/supervisao "
@@ -35,17 +38,43 @@ def parse_completion_to_label(text: str):
     return None  # model produced something unparseable, drop from metrics
 
 
-def generate_predictions(model, tokenizer, df: pd.DataFrame, feature_columns: list, max_new_tokens: int = 4):
+def generate_predictions(
+    model,
+    tokenizer,
+    df: pd.DataFrame,
+    feature_columns: list,
+    max_new_tokens: int = 4,
+    max_input_length: int = 768,   # deve corresponder ao MAX_SEQ_LENGTH do treino
+    empty_cache_every: int = 50,   # liberta cache periodicamente para evitar fragmentacao
+):
     predictions = []
-    for _, row in df.iterrows():
-        prompt = row_to_profile_text(row, feature_columns)
-        messages = [{"role": "user", "content": prompt}]
-        inputs = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
-        ).to(model.device)
-        output = model.generate(
-            input_ids=inputs, max_new_tokens=max_new_tokens, do_sample=False,
-        )
-        completion = tokenizer.decode(output[0][inputs.shape[1]:], skip_special_tokens=True)
-        predictions.append(parse_completion_to_label(completion))
+
+    with torch.inference_mode():
+        for i, (_, row) in enumerate(df.iterrows()):
+            prompt = row_to_profile_text(row, feature_columns)
+            messages = [{"role": "user", "content": prompt}]
+            inputs = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_input_length,
+            ).to(model.device)
+
+            output = model.generate(
+                input_ids=inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+            completion = tokenizer.decode(output[0][inputs.shape[1]:], skip_special_tokens=True)
+            predictions.append(parse_completion_to_label(completion))
+
+            # limpeza periodica para evitar acumulacao de fragmentacao de VRAM
+            del inputs, output
+            if (i + 1) % empty_cache_every == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+
     return predictions
